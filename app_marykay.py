@@ -1123,4 +1123,4 @@ st.markdown(
     "Mary Kay de México · Market Intelligence · Steffany Lara · Febrero 2026"
     "</div>",
     unsafe_allow_html=True,
-) 
+)
