@@ -920,7 +920,7 @@ with tab1:
             "<div class='mk-caption'>"
             "Cada celda muestra el monto promedio (o mediana) de wholesale de las <b>reórdenes</b> "
             "colocadas en ese rango de días, para consultoras cuyo primer pedido del mes cayó en el grupo indicado. "
-            "Las celdas con <b>—</b> corresponden a combinaciones temporalmente imposibles "
+            "Las celdas con <b>None</b> corresponden a combinaciones temporalmente imposibles "
             "(no se puede reordenar antes del primer pedido). "
             "Usa la mediana para comparaciones más robustas si hay outliers."
             "</div>",
