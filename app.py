@@ -23,6 +23,9 @@ CAMBIOS RESPECTO A LA VERSIÓN ANTERIOR
 [CORRECCIÓN 5] Metadatos de limpieza (`__WS_COL__`, `__WS_WINSOR_N__`, etc.) desacoplados
               del DataFrame y guardados en st.session_state. Evita columnas "fantasma" que
               inflan el hash de caché y confunden a quien lee el código.
+
+[NUEVO]       Sección "¿Cuánto reordenan?" en Tab 1: tablas de promedio y mediana de
+              wholesale por grupo de primer pedido × bucket de reorden.
 """
 
 import warnings
@@ -528,6 +531,58 @@ def build_reorder_bucket_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     return wide
 
 
+# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Monto de reórdenes (¿Cuánto reordenan?) — Tab 1
+@st.cache_data(show_spinner=False)
+def build_reorder_amount_breakdown(df: pd.DataFrame, ws_col: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Para cada (GrupoPrimerOrden, ReBucket) calcula promedio y mediana de wholesale
+    de los eventos de reorden. Elimina combinaciones temporalmente imposibles.
+
+    Retorna:
+        avg_wide – DataFrame wide con promedios  (GrupoPrimerOrden × bucket de reorden)
+        med_wide – DataFrame wide con medianas   (GrupoPrimerOrden × bucket de reorden)
+    """
+    d  = build_reorder_events(df)
+    re = d[d["IsReorderEvent"]].copy()
+
+    # Skeleton vacío si no hay reórdenes
+    _empty = pd.DataFrame({"GrupoPrimerOrden": pd.Categorical(GRUPO_ORDER, categories=GRUPO_ORDER, ordered=True)})
+    for b in GRUPO_ORDER:
+        _empty[b] = np.nan
+    if re.empty:
+        return _empty.copy(), _empty.copy()
+
+    # Filtrar combinaciones temporalmente imposibles
+    re["_GrupoRank"]  = re["GrupoPrimerOrden"].map(_GRUPO_RANK)
+    re["_BucketRank"] = re["ReBucket"].map(_GRUPO_RANK)
+    re = re[re["_BucketRank"] >= re["_GrupoRank"]].drop(columns=["_GrupoRank", "_BucketRank"])
+
+    def _pivot_stat(stat_fn, name):
+        agg = (
+            re.groupby(["GrupoPrimerOrden", "ReBucket"], observed=True)[ws_col]
+              .agg(stat_fn)
+              .reset_index(name=name)
+        )
+        wide = (
+            agg.pivot(index="GrupoPrimerOrden", columns="ReBucket", values=name)
+               .reindex(GRUPO_ORDER)
+               .reset_index()
+        )
+        # Asegurar que existan las 4 columnas aunque no haya datos
+        for b in GRUPO_ORDER:
+            if b not in wide.columns:
+                wide[b] = np.nan
+        wide["GrupoPrimerOrden"] = pd.Categorical(
+            wide["GrupoPrimerOrden"], categories=GRUPO_ORDER, ordered=True
+        )
+        return wide
+
+    avg_wide = _pivot_stat("mean",   "Promedio")
+    med_wide = _pivot_stat("median", "Mediana")
+
+    return avg_wide, med_wide
+
+
 # ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Helpers de visualización
 _FONT_FAMILY = 'ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial'
 
@@ -722,13 +777,10 @@ with tab1:
 
     
     
-    # ── Tabla: distribución de reórdenes por bucket (visible sin hover) ──
-    # Usa `breakdown` ya calculado arriba por build_reorder_bucket_breakdown(df_f)
-    # y `resumen` que ya tiene el merge. No se recomputa ninguna lógica nueva.
+    # ── Tabla: ¿Cuándo reordenan? ──────────────────────────────────────────
     breakdown_tbl = breakdown[
         ["GrupoPrimerOrden", "Días 1-8", "Días 9-16", "Días 17-24", "Días 25-fin"]
     ].copy()
-    # Añadir % Reorden del grupo para contexto
     breakdown_tbl = breakdown_tbl.merge(
         resumen[["GrupoPrimerOrden", "PctReorden_%"]], on="GrupoPrimerOrden", how="left"
     )
@@ -795,7 +847,105 @@ with tab1:
         "</div>",
         unsafe_allow_html=True,
     )
-    
+
+
+    # ── Tabla: ¿Cuánto reordenan? ──────────────────────────────────────────
+    st.markdown(
+        '<div class="mk-card">'
+        '<h3 class="mk-card-title">¿Cuánto reordenan? — Monto de reórdenes por grupo de primer pedido</h3>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    amt_avg_wide, amt_med_wide = build_reorder_amount_breakdown(df_f, ws_col)
+
+    _amt_all_nan = amt_avg_wide[GRUPO_ORDER].isna().all().all()
+
+    if _amt_all_nan:
+        st.markdown(
+            "<div class='mk-insight'>Sin reórdenes en la selección actual — no hay montos que mostrar.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        # ── Sub-tabla: Promedio ────────────────────────────────────────────
+        st.markdown(
+            "<div class='mk-caption' style='margin-top:10px; font-weight:700; color:#374151;'>"
+            "Promedio de wholesale por reorden (MXN)</div>",
+            unsafe_allow_html=True,
+        )
+
+        avg_tbl = amt_avg_wide[["GrupoPrimerOrden"] + GRUPO_ORDER].copy()
+        avg_tbl.columns = ["Grupo primer pedido"] + [f"Reorden en {b.replace('Días ', '')}" for b in GRUPO_ORDER]
+
+        _avg_money_cols = [c for c in avg_tbl.columns if c != "Grupo primer pedido"]
+        _avg_format     = {c: lambda v: f"${v:,.0f}" if pd.notna(v) else "—" for c in _avg_money_cols}
+
+        styled_avg = (
+            avg_tbl.style
+            .format(_avg_format)
+            .background_gradient(subset=_avg_money_cols, cmap="RdPu", axis=None)
+        )
+        try:
+            styled_avg = styled_avg.hide(axis="index")
+        except Exception:
+            pass
+        st.dataframe(styled_avg, use_container_width=True)
+
+        # ── Sub-tabla: Mediana ─────────────────────────────────────────────
+        st.markdown(
+            "<div class='mk-caption' style='margin-top:14px; font-weight:700; color:#374151;'>"
+            "Mediana de wholesale por reorden (MXN) — más robusta ante valores atípicos</div>",
+            unsafe_allow_html=True,
+        )
+
+        med_tbl = amt_med_wide[["GrupoPrimerOrden"] + GRUPO_ORDER].copy()
+        med_tbl.columns = ["Grupo primer pedido"] + [f"Reorden en {b.replace('Días ', '')}" for b in GRUPO_ORDER]
+
+        _med_money_cols = [c for c in med_tbl.columns if c != "Grupo primer pedido"]
+        _med_format     = {c: lambda v: f"${v:,.0f}" if pd.notna(v) else "—" for c in _med_money_cols}
+
+        styled_med = (
+            med_tbl.style
+            .format(_med_format)
+            .background_gradient(subset=_med_money_cols, cmap="RdPu", axis=None)
+        )
+        try:
+            styled_med = styled_med.hide(axis="index")
+        except Exception:
+            pass
+        st.dataframe(styled_med, use_container_width=True)
+
+        # ── Caption explicativa ────────────────────────────────────────────
+        st.markdown(
+            "<div class='mk-caption'>"
+            "Cada celda muestra el monto promedio (o mediana) de wholesale de las <b>reórdenes</b> "
+            "colocadas en ese rango de días, para consultoras cuyo primer pedido del mes cayó en el grupo indicado. "
+            "Las celdas con <b>—</b> corresponden a combinaciones temporalmente imposibles "
+            "(no se puede reordenar antes del primer pedido). "
+            "Usa la mediana para comparaciones más robustas si hay outliers."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Insight automático ─────────────────────────────────────────────
+        try:
+            # Comparar monto mediana de reórdenes en días 25-fin entre grupos extremos
+            col_fin = "Reorden en 25-fin"
+            if col_fin in med_tbl.columns:
+                med_fin = med_tbl.set_index("Grupo primer pedido")[col_fin].dropna()
+                if len(med_fin) >= 2:
+                    g_max = med_fin.idxmax()
+                    g_min = med_fin.idxmin()
+                    st.markdown(
+                        f"<div class='mk-insight'><b>Insight:</b> Las reórdenes colocadas en <b>días 25–fin</b> "
+                        f"tienen mayor monto mediano en el grupo <b>{g_max}</b> "
+                        f"(<b>${med_fin[g_max]:,.0f}</b>) y menor en <b>{g_min}</b> "
+                        f"(<b>${med_fin[g_min]:,.0f}</b>). "
+                        "Considera campañas de cierre de mes diferenciadas por perfil de primer pedido.</div>",
+                        unsafe_allow_html=True,
+                    )
+        except Exception:
+            pass
 
 
     st.markdown('<div class="mk-card"><h3 class="mk-card-title">Tabla resumen</h3></div>', unsafe_allow_html=True)
@@ -976,10 +1126,8 @@ with tab4:
     st.plotly_chart(fig_profile, use_container_width=True)
 
     # Eventos de reorden ──────────────────────────────────────────────────
-    # CAMBIO: se consume build_reorder_events() cacheado en lugar de
-    # recomputar la misma lógica inline en cada render.
     d  = build_reorder_events(df_f)
-    re = d[d["IsReorderEvent"]].copy()   # .copy() explícito; ya no hay re = re.copy() redundante
+    re = d[d["IsReorderEvent"]].copy()
 
     if re.empty:
         st.markdown(
