@@ -1460,20 +1460,42 @@ with tab_rec:
         if "Nombre" in ui_view.columns:
             ui_view["Nombre"] = ui_view["Nombre"].astype(str).apply(_mask_name)
 
-        styled_ui = (
-            ui_view.style
-            .format({
-                "MesesConOrden":      "{:,.0f}",
-                "TotalOrdenes":       "{:,.0f}",
-                "WholesaleAcumulado": "${:,.0f}",
-                "TicketPromedio":     "${:,.0f}",
-            })
-            .background_gradient(subset=["MesesConOrden", "WholesaleAcumulado"], cmap="RdPu")
-        )
+        # Castear columnas numericas a float antes de pasarlas al Styler.
+        # Streamlit usa Arrow para serializar; columnas con dtype object o NaN
+        # mixto truena en marshall_styler. El cast explicito lo previene.
+        for _num_col in ["MesesConOrden", "TotalOrdenes", "WholesaleAcumulado", "TicketPromedio"]:
+            if _num_col in ui_view.columns:
+                ui_view[_num_col] = pd.to_numeric(ui_view[_num_col], errors="coerce")
+
+        def _fmt_money(v):
+            return f"${v:,.0f}" if pd.notna(v) else "-"
+
+        def _fmt_int(v):
+            return f"{v:,.0f}" if pd.notna(v) else "-"
+
+        _fmt_map = {}
+        for _c in ["WholesaleAcumulado", "TicketPromedio"]:
+            if _c in ui_view.columns:
+                _fmt_map[_c] = _fmt_money
+        for _c in ["MesesConOrden", "TotalOrdenes"]:
+            if _c in ui_view.columns:
+                _fmt_map[_c] = _fmt_int
+
+        _grad_cols = [c for c in ["MesesConOrden", "WholesaleAcumulado"]
+                      if c in ui_view.columns and ui_view[c].notna().any()]
+
         try:
-            styled_ui = styled_ui.hide(axis="index")
+            _s = ui_view.style.format(_fmt_map)
+            if _grad_cols:
+                _s = _s.background_gradient(subset=_grad_cols, cmap="RdPu")
+            try:
+                _s = _s.hide(axis="index")
+            except Exception:
+                pass
+            styled_ui = _s
+            use_styled = True
         except Exception:
-            pass
+            use_styled = False
 
         st.markdown(
             f"<div class='mk-caption' style='margin-top:14px;'>"
@@ -1483,7 +1505,10 @@ with tab_rec:
             f"</div>",
             unsafe_allow_html=True,
         )
-        st.dataframe(styled_ui, use_container_width=True, height=520)
+        if use_styled:
+            st.dataframe(styled_ui, use_container_width=True, height=520)
+        else:
+            st.dataframe(ui_view, use_container_width=True, height=520)
 
         # ===== version descarga (con datos reales) =====
         dl_cols_order = []
