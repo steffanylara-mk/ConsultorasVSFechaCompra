@@ -1,53 +1,48 @@
 """
-Mary Kay de México — Dashboard de Órdenes (Brand-aligned)
+Mary Kay de Mexico - Dashboard de Ordenes (Brand-aligned)
 Autora: Steffany Lara | Market Intelligence
 Fecha: Febrero 2026
 
-CAMBIOS RESPECTO A LA VERSIÓN ANTERIOR
-────────────────────────────────────────
-[ELIMINADO]   Gráfica "¿Cuándo Reordenan? — Distribución de reórdenes por rango de días"
-              + bloques asociados (GRUPOS_PLOT, share_tbl, share_tbl_plot, re-normalización,
-              caption de exclusión, insight end_share).
+CAMBIOS EN ESTA REVISION
+========================
+[FIX A] Bloque inicial de warnings reescrito. Antes se referenciaba
+        pd.errors.PerformanceWarning antes de importar pandas (funcionaba
+        solo por evaluacion perezosa del ternario). Imports primero,
+        configuracion de warnings despues.
 
-[CORRECCIÓN 1] Cómputo de reórdenes duplicado (Tab 4 vs build_reorder_bucket_breakdown).
-              Extraído a helper cacheado `build_reorder_events()` que ambos bloques consumen.
-              Elimina el recálculo costoso en cada interacción de widget.
+[FIX B] Doble import warnings eliminado.
 
-[CORRECCIÓN 2] `re = re.copy()` redundante eliminado: `re` ya era un .copy() una línea antes.
+[CONF]  ConsultantNumber NUNCA aparece en la UI. Se sustituye por un
+        identificador anonimo C-00001, C-00002, ... estable en
+        st.session_state. El CSV de descarga interno sigue incluyendo
+        ConsultantNumber para uso operativo (toggle disponible).
 
-[CORRECCIÓN 3] `_ws_col_info` asignado y nunca usado, eliminado.
-
-[CORRECCIÓN 4] `warnings.filterwarnings("ignore")` demasiado amplio reemplazado por filtro
-              específico a PerformanceWarning de pandas.
-
-[CORRECCIÓN 5] Metadatos de limpieza (`__WS_COL__`, `__WS_WINSOR_N__`, etc.) desacoplados
-              del DataFrame y guardados en st.session_state. Evita columnas "fantasma" que
-              inflan el hash de caché y confunden a quien lee el código.
-
-[NUEVO]       Sección "¿Cuánto reordenan?" en Tab 1: tablas de promedio y mediana de
-              wholesale por grupo de primer pedido × bucket de reorden.
+[NUEVO] Tab "Recurrencia": detecta consultoras recurrentes inactivas
+        (lapsing customers) usando filtrado RFM:
+          F: meses con orden en historico previo >= N
+          R: sin orden este mes y/o mes anterior
+        Descarga CSV con ConsultantNumber, Nombre, Division, CareerLevel
+        y Estatus (las columnas que existan en el CSV original).
 """
 
+# ---------------------------------------------------------------------- imports
 import warnings
-warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning if False else UserWarning)
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import warnings  # re-import after suppression setup
 
-# Suprimir sólo PerformanceWarning de pandas (e.g. fragmentación de DataFrame)
+# Suprimir solo PerformanceWarning de pandas (fragmentacion de DataFrame, etc.)
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Config. inicial.
+# ---------------------------------------------------------------------- config
 st.set_page_config(
-    page_title="Mary Kay · Órdenes",
+    page_title="Mary Kay - Ordenes",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Brand tokens
+# ---------------------------------------------------------------------- brand
 MK_PINK      = "#E91E8C"
 MK_PINK_DARK = "#C2185B"
 MK_PINK_SOFT = "#FCE4EC"
@@ -57,13 +52,13 @@ MK_GRAY_500  = "#6B7280"
 MK_GRAY_200  = "#E5E7EB"
 MK_WHITE     = "#FFFFFF"
 
-GRUPO_ORDER     = ["Días 1-8", "Días 9-16", "Días 17-24", "Días 25-fin"]
+GRUPO_ORDER     = ["Dias 1-8", "Dias 9-16", "Dias 17-24", "Dias 25-fin"]
 COLORES_GRUPOS  = [MK_PINK, MK_PINK_DARK, "#F06292", MK_GRAY_500]
 _GRUPO_RANK     = {g: i for i, g in enumerate(GRUPO_ORDER)}
 
 LOGO_URL = "https://1000marcas.net/wp-content/uploads/2021/05/Mary-Kay-logo.jpg"
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ CSS
+# ---------------------------------------------------------------------- CSS
 st.markdown(
     f"""
 <style>
@@ -86,7 +81,7 @@ st.markdown(
 
     h1, h2, h3 {{
         font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
-                     Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+                     Roboto, Helvetica, Arial;
         letter-spacing: -0.02em;
     }}
     p, div, span, label {{
@@ -296,12 +291,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Helpers — bucketización
+# ---------------------------------------------------------------------- helpers
 _BUCKET_BINS   = [0, 8, 16, 24, 31]
 _BUCKET_LABELS = GRUPO_ORDER
 
 def bucketize(series: pd.Series) -> pd.Categorical:
-    """Día del mes (int) → Categorical bucket. Vectorizado (10x más rápido que .apply)."""
+    """Dia del mes (int) -> Categorical bucket. Vectorizado."""
     return pd.Categorical(
         pd.cut(series, bins=_BUCKET_BINS, labels=_BUCKET_LABELS, include_lowest=True),
         categories=GRUPO_ORDER,
@@ -309,18 +304,32 @@ def bucketize(series: pd.Series) -> pd.Categorical:
     )
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Carga y validación
+def get_anon_id_map(consultant_numbers) -> dict:
+    """
+    Mapea ConsultantNumber -> 'C-00001' de forma estable durante la sesion.
+
+    El mapeo persiste en st.session_state, asi que IDs anonimos no cambian
+    entre rerenders cuando el usuario interactua con widgets.
+    """
+    if "anon_map" not in st.session_state:
+        st.session_state["anon_map"] = {}
+    anon_map = st.session_state["anon_map"]
+    for cn in sorted(set(consultant_numbers)):
+        if cn not in anon_map:
+            anon_map[cn] = f"C-{len(anon_map) + 1:05d}"
+    return anon_map
+
+
+# ---------------------------------------------------------------------- carga
 @st.cache_data(show_spinner="Cargando datos...")
 def cargar_datos(file) -> tuple[pd.DataFrame, dict]:
     """
     Lee el CSV, valida y limpia.
 
     Retorna:
-        df   – DataFrame limpio (sin columnas de metadatos "fantasma").
-        meta – dict con metadatos de limpieza: ws_col, n_winsor, ws_p01, ws_p99.
-
-    CAMBIO: los metadatos ya NO se guardan como columnas del DataFrame;
-    se devuelven en un dict separado para mayor claridad y menor overhead de caché.
+        df   - DataFrame limpio.
+        meta - dict con metadatos de limpieza: ws_col, n_winsor, ws_p01, ws_p99,
+               y la lista de columnas demograficas opcionales detectadas.
     """
     df = pd.read_csv(file)
 
@@ -341,7 +350,7 @@ def cargar_datos(file) -> tuple[pd.DataFrame, dict]:
 
     n_bad_dates = df["OrderDateKEY"].isna().sum() + df["OrderMonthKey"].isna().sum()
     if n_bad_dates > 0:
-        st.warning(f"{n_bad_dates} fechas no pudieron parsearse (YYYYMMDD inválido) — se descartaron.")
+        st.warning(f"{n_bad_dates} fechas no pudieron parsearse - se descartaron.")
     df = df.dropna(subset=["OrderDateKEY", "OrderMonthKey"])
 
     invalid_months = (
@@ -349,12 +358,12 @@ def cargar_datos(file) -> tuple[pd.DataFrame, dict]:
         (df["OrderMonthKey"].dt.month != df["OrderDateKEY"].dt.month)
     )
     if invalid_months.any():
-        st.warning(f"{invalid_months.sum()} filas con OrderMonthKey ≠ mes de OrderDateKEY — se descartaron.")
+        st.warning(f"{invalid_months.sum()} filas con OrderMonthKey distinto al mes de OrderDateKEY - se descartaron.")
         df = df[~invalid_months].copy()
 
     dup_mask = df.duplicated(subset=["OrderKEY"])
     if dup_mask.any():
-        st.warning(f"{dup_mask.sum()} OrderKEY duplicados detectados — se eliminan duplicados.")
+        st.warning(f"{dup_mask.sum()} OrderKEY duplicados - se eliminan.")
         df = df.drop_duplicates(subset=["OrderKEY"])
 
     df["Day"]       = df["OrderDateKEY"].dt.day
@@ -376,22 +385,35 @@ def cargar_datos(file) -> tuple[pd.DataFrame, dict]:
     else:
         df["ProductionOrderCount"] = 1
 
+    # Detectar columnas demograficas opcionales que pueda venir en el CSV.
+    # Cualquier conjunto razonable de nombres que pudiera estar en el dump
+    # (DimConsultant.* o flatten desde otras dims).
+    demographic_candidates = {
+        "name":         ["ConsultantName", "FullName", "Name"],
+        "division":     ["DivisionName", "Division", "DivisionCode", "AreaName", "Area"],
+        "career_level": ["CareerLevelCode", "CareerLevel", "CareerLevelName"],
+        "status":       ["ActivityStatusCode", "ActivityStatus", "Status"],
+    }
+    demo_cols_found = {}
+    for role, candidates in demographic_candidates.items():
+        for c in candidates:
+            if c in df.columns:
+                demo_cols_found[role] = c
+                break
+
     meta = {
         "ws_col":   ws_col,
         "n_winsor": n_winsor,
         "ws_p01":   float(ws_p01),
         "ws_p99":   float(ws_p99),
+        "demo_cols": demo_cols_found,
     }
     return df, meta
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Panel primer orden por consultora-mes
+# ---------------------------------------------------------------------- panel
 @st.cache_data(show_spinner="Construyendo panel por consultora y mes...")
 def construir_primer(df: pd.DataFrame, ws_col: str) -> pd.DataFrame:
-    """
-    Recibe `ws_col` explícitamente en lugar de leerlo de una columna "__WS_COL__".
-    Esto hace la firma de la función auto-documentada y el hash de caché más preciso.
-    """
     agg_dict = {
         "PrimerDia":      ("Day", "first"),
         "TotalOrderDays": ("OrderDateKEY", "nunique"),
@@ -426,22 +448,9 @@ def construir_primer(df: pd.DataFrame, ws_col: str) -> pd.DataFrame:
     return primer
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Helper cacheado: eventos de reorden
-
+# ---------------------------------------------------------------------- reorder helpers
 @st.cache_data(show_spinner=False)
 def build_reorder_events(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Añade al DataFrame las columnas:
-      - FirstOrderDate     : primera fecha de orden del consultora-mes
-      - OrderSeq           : secuencia de orden dentro del mismo día (consultora-mes-día)
-      - IsReorderEvent     : True si es reorden (fecha posterior o mismo-día seq>1)
-      - PrimerDia          : día del mes del primer pedido
-      - GrupoPrimerOrden   : bucket del primer pedido (Categorical)
-      - ReBucket           : bucket del día del evento reorden (Categorical)
-
-    NUEVO: función extraída para evitar que Tab 4 y build_reorder_bucket_breakdown
-    recalculen la misma lógica de forma independiente en cada interacción.
-    """
     d = df.copy()
 
     first_order_date = (
@@ -467,16 +476,8 @@ def build_reorder_events(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Hover breakdown para Tab 1
 @st.cache_data(show_spinner=False)
 def build_reorder_bucket_breakdown(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Para cada GrupoPrimerOrden, computa la distribución de eventos de reorden
-    entre buckets de días. Resultado usado como customdata en el hover del
-    gráfico "% Reorden por grupo" (Tab 1).
-
-    CAMBIO: ahora consume build_reorder_events() en lugar de duplicar la lógica.
-    """
     d = build_reorder_events(df)
     re = d[d["IsReorderEvent"]].copy()
 
@@ -484,7 +485,7 @@ def build_reorder_bucket_breakdown(df: pd.DataFrame) -> pd.DataFrame:
         out = pd.DataFrame({"GrupoPrimerOrden": GRUPO_ORDER})
         for b in GRUPO_ORDER:
             out[b] = 0.0
-        out["BreakdownStr"] = "Sin reórdenes en selección"
+        out["BreakdownStr"] = "Sin reordenes en seleccion"
         return out
 
     counts = (
@@ -493,7 +494,6 @@ def build_reorder_bucket_breakdown(df: pd.DataFrame) -> pd.DataFrame:
           .reset_index(name="N")
     )
 
-    # Filtrar combinaciones temporalmente imposibles
     counts["_GrupoRank"]  = counts["GrupoPrimerOrden"].map(_GRUPO_RANK)
     counts["_BucketRank"] = counts["ReBucket"].map(_GRUPO_RANK)
     counts = counts[counts["_BucketRank"] >= counts["_GrupoRank"]].drop(
@@ -521,38 +521,29 @@ def build_reorder_bucket_breakdown(df: pd.DataFrame) -> pd.DataFrame:
         grupo = str(row["GrupoPrimerOrden"])
         rank  = _GRUPO_RANK.get(grupo, 0)
         parts = [
-            f"{row[b]:.1f}% ({b.replace('Días ', '')})"
+            f"{row[b]:.1f}% ({b.replace('Dias ', '')})"
             for b in GRUPO_ORDER
             if _GRUPO_RANK.get(b, 0) >= rank and row.get(b, 0) > 0
         ]
-        return " · ".join(parts) if parts else "Sin reórdenes registrados"
+        return " . ".join(parts) if parts else "Sin reordenes registrados"
 
     wide["BreakdownStr"] = wide.apply(_breakdown_str, axis=1)
     return wide
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Monto de reórdenes (¿Cuánto reordenan?) — Tab 1
 @st.cache_data(show_spinner=False)
 def build_reorder_amount_breakdown(df: pd.DataFrame, ws_col: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Para cada (GrupoPrimerOrden, ReBucket) calcula promedio y mediana de wholesale
-    de los eventos de reorden. Elimina combinaciones temporalmente imposibles.
-
-    Retorna:
-        avg_wide – DataFrame wide con promedios  (GrupoPrimerOrden × bucket de reorden)
-        med_wide – DataFrame wide con medianas   (GrupoPrimerOrden × bucket de reorden)
-    """
     d  = build_reorder_events(df)
     re = d[d["IsReorderEvent"]].copy()
 
-    # Skeleton vacío si no hay reórdenes
-    _empty = pd.DataFrame({"GrupoPrimerOrden": pd.Categorical(GRUPO_ORDER, categories=GRUPO_ORDER, ordered=True)})
+    _empty = pd.DataFrame({
+        "GrupoPrimerOrden": pd.Categorical(GRUPO_ORDER, categories=GRUPO_ORDER, ordered=True)
+    })
     for b in GRUPO_ORDER:
         _empty[b] = np.nan
     if re.empty:
         return _empty.copy(), _empty.copy()
 
-    # Filtrar combinaciones temporalmente imposibles
     re["_GrupoRank"]  = re["GrupoPrimerOrden"].map(_GRUPO_RANK)
     re["_BucketRank"] = re["ReBucket"].map(_GRUPO_RANK)
     re = re[re["_BucketRank"] >= re["_GrupoRank"]].drop(columns=["_GrupoRank", "_BucketRank"])
@@ -568,7 +559,6 @@ def build_reorder_amount_breakdown(df: pd.DataFrame, ws_col: str) -> tuple[pd.Da
                .reindex(GRUPO_ORDER)
                .reset_index()
         )
-        # Asegurar que existan las 4 columnas aunque no haya datos
         for b in GRUPO_ORDER:
             if b not in wide.columns:
                 wide[b] = np.nan
@@ -583,7 +573,61 @@ def build_reorder_amount_breakdown(df: pd.DataFrame, ws_col: str) -> tuple[pd.Da
     return avg_wide, med_wide
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Helpers de visualización
+# ---------------------------------------------------------------------- recurrencia (NUEVO)
+@st.cache_data(show_spinner="Computando matriz de recurrencia...")
+def build_recurrence_matrix(primer: pd.DataFrame) -> pd.DataFrame:
+    """
+    Matriz binaria ConsultantNumber x MonthSort: 1 si la consultora puso
+    al menos una orden ese mes, 0 si no.
+
+    Notese que esto se construye sobre 'primer' (el panel agregado), no sobre
+    el df de transacciones. Cualquier consultora con al menos una fila en
+    primer cuenta como activa en ese mes.
+    """
+    mat = (
+        primer.assign(TieneOrden=1)
+              .pivot_table(
+                  index="ConsultantNumber",
+                  columns="MonthSort",
+                  values="TieneOrden",
+                  fill_value=0,
+                  aggfunc="max",
+              )
+              .astype(int)
+    )
+    # Ordenar columnas cronologicamente
+    mat = mat.reindex(sorted(mat.columns), axis=1)
+    return mat
+
+
+def get_last_known_info(df: pd.DataFrame, demo_cols: dict) -> pd.DataFrame:
+    """
+    Para cada ConsultantNumber devuelve la ultima informacion conocida
+    de las columnas demograficas detectadas (nombre, division, career level,
+    estatus). La ultima fila se determina por OrderDateKEY descendente.
+    """
+    cols_to_pull = ["ConsultantNumber", "OrderDateKEY"] + list(demo_cols.values())
+    cols_to_pull = [c for c in cols_to_pull if c in df.columns]
+
+    last = (
+        df[cols_to_pull]
+        .sort_values("OrderDateKEY")
+        .groupby("ConsultantNumber", as_index=False)
+        .last()
+        .drop(columns=["OrderDateKEY"], errors="ignore")
+    )
+
+    # Tambien anexar fecha de ultima orden absoluta (util para priorizacion)
+    last_date = (
+        df.groupby("ConsultantNumber", as_index=False)["OrderDateKEY"]
+          .max()
+          .rename(columns={"OrderDateKEY": "UltimaOrden"})
+    )
+    last = last.merge(last_date, on="ConsultantNumber", how="left")
+    return last
+
+
+# ---------------------------------------------------------------------- viz helpers
 _FONT_FAMILY = 'ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial'
 
 def mk_plotly_layout(fig: go.Figure, title: str, y_title: str = "", x_title: str = "") -> go.Figure:
@@ -630,31 +674,31 @@ def kpi_card(col, label: str, value: str, note: str = "") -> None:
         )
 
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Sidebar
+# ---------------------------------------------------------------------- sidebar
 with st.sidebar:
     st.image(LOGO_URL, use_container_width=True)
     st.markdown("### Filtros")
     st.markdown("---")
 
     uploaded = st.file_uploader(
-        "Cargar CSV de órdenes",
+        "Cargar CSV de ordenes",
         type=["csv"],
         help="Archivo analysis_MonthlyOrdersByDay_PV.csv",
     )
 
     st.markdown("---")
     st.markdown(
-        "<div class='mk-caption'>Market Intelligence · Mary Kay de México<br>"
-        "Steffany Lara · Febrero 2026</div>",
+        "<div class='mk-caption'>Market Intelligence . Mary Kay de Mexico<br>"
+        "Steffany Lara . Febrero 2026</div>",
         unsafe_allow_html=True,
     )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Header
+# ---------------------------------------------------------------------- header
 st.markdown(
     """
 <div class="mk-header">
-  <h1 class="mk-title">Análisis de Comportamiento de Órdenes</h1>
-  <p class="mk-subtitle">Mary Kay de México · Jul 2025 – Ene 2026</p>
+  <h1 class="mk-title">Analisis de Comportamiento de Ordenes</h1>
+  <p class="mk-subtitle">Mary Kay de Mexico . Jul 2025 - Ene 2026</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -667,11 +711,15 @@ if uploaded is None:
     )
     st.stop()
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Carga + metadatos
+# ---------------------------------------------------------------------- carga
 df, meta = cargar_datos(uploaded)
-ws_col = meta["ws_col"]
+ws_col   = meta["ws_col"]
+demo_cols = meta["demo_cols"]
 
 primer = construir_primer(df, ws_col)
+
+# Construir mapeo anonimo a nivel global (todas las consultoras del dataset)
+anon_map = get_anon_id_map(primer["ConsultantNumber"].unique().tolist())
 
 meses_disponibles = (
     primer[["Month", "MonthSort"]].drop_duplicates()
@@ -688,16 +736,24 @@ if not meses_sel:
 primer_f = primer[primer["Month"].isin(meses_sel)].copy()
 df_f     = df[df["Month"].isin(meses_sel)].copy()
 
-# Banner de calidad de datos (winsorización)
 if meta["n_winsor"] > 0:
     st.markdown(
         f"<div class='mk-caption'><b>Calidad de datos:</b> {meta['n_winsor']:,} valores de wholesale "
-        f"fueron winzorizados al rango ${meta['ws_p01']:,.0f} – ${meta['ws_p99']:,.0f} "
-        "(percentiles 1%–99%) para reducir el efecto de pedidos atípicos en los promedios.</div>",
+        f"fueron winzorizados al rango ${meta['ws_p01']:,.0f} - ${meta['ws_p99']:,.0f} "
+        "(percentiles 1%-99%) para reducir el efecto de pedidos atipicos en los promedios.</div>",
         unsafe_allow_html=True,
     )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Resumen por grupo
+# Banner informativo sobre columnas demograficas detectadas
+if demo_cols:
+    detected_str = ", ".join(f"{k}={v}" for k, v in demo_cols.items())
+    st.markdown(
+        f"<div class='mk-caption'><b>Columnas demograficas detectadas en el CSV:</b> {detected_str}. "
+        "Estas se usaran en la tab Recurrencia para enriquecer la descarga.</div>",
+        unsafe_allow_html=True,
+    )
+
+# ---------------------------------------------------------------------- resumen
 resumen = (
     primer_f.groupby("GrupoPrimerOrden", observed=True)
     .agg(
@@ -712,7 +768,6 @@ resumen["PctReorden_%"] = (resumen["PctReorden"] * 100).round(1)
 resumen["AvgWholesale"] = resumen["AvgWholesale"].round(0)
 resumen["MedianaWS"]    = resumen["MedianaWS"].round(0)
 
-# Breakdown para hover (Tab 1)
 breakdown = build_reorder_bucket_breakdown(df_f)
 resumen   = resumen.merge(
     breakdown[["GrupoPrimerOrden", "BreakdownStr"]],
@@ -720,24 +775,26 @@ resumen   = resumen.merge(
     how="left",
 )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ KPIssss
+# ---------------------------------------------------------------------- KPIs
 total_cons   = int(primer_f["ConsultantNumber"].nunique())
 pct_reorden  = float(primer_f["Reordena"].mean() * 100) if len(primer_f) else 0.0
 avg_ws_total = float(primer_f["AvgWholesale"].mean()) if len(primer_f) else 0.0
 grp_top      = str(resumen.loc[resumen["PctReorden_%"].idxmax(), "GrupoPrimerOrden"]) if len(resumen) else "N/A"
 
 k1, k2, k3, k4 = st.columns(4)
-kpi_card(k1, "Consultoras únicas", f"{total_cons:,}")
+kpi_card(k1, "Consultoras unicas", f"{total_cons:,}")
 kpi_card(k2, "% Reorden global",   f"{pct_reorden:.1f}%")
 kpi_card(k3, "Avg Wholesale",      f"${avg_ws_total:,.0f}")
 kpi_card(k4, "Grupo top reorden",  grp_top)
 
 st.markdown("")
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Resumen", "Por mes", "Wholesale", "Insights", "Datos"])
+# ---------------------------------------------------------------------- tabs
+tab1, tab2, tab3, tab4, tab_rec, tab5 = st.tabs(
+    ["Resumen", "Por mes", "Wholesale", "Insights", "Recurrencia", "Datos"]
+)
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Tab 1: Resumen
+# ====================================================================== TAB 1
 with tab1:
     cA, cB = st.columns(2)
 
@@ -752,7 +809,7 @@ with tab1:
             cliponaxis=False,
             hovertemplate="<b>%{x}</b><br>Consultoras: %{y:,}<extra></extra>",
         ))
-        fig1 = mk_plotly_layout(fig1, "Consultoras únicas por grupo", "Consultoras")
+        fig1 = mk_plotly_layout(fig1, "Consultoras unicas por grupo", "Consultoras")
         st.plotly_chart(fig1, use_container_width=True)
 
     with cB:
@@ -768,64 +825,62 @@ with tab1:
             hovertemplate=(
                 "<b>%{x}</b><br>"
                 "% Reorden: %{y:.1f}%<br>"
-                "<br><b>Distribución de reórdenes (dentro del grupo):</b><br>"
+                "<br><b>Distribucion de reordenes (dentro del grupo):</b><br>"
                 "%{customdata[0]}<extra></extra>"
             ),
         ))
         fig2 = mk_plotly_layout(fig2, "% Reorden por grupo", "% Reorden")
         st.plotly_chart(fig2, use_container_width=True)
 
-    
-    
-    # ── Tabla: ¿Cuándo reordenan? ──────────────────────────────────────────
+    # Tabla: cuando reordenan
     breakdown_tbl = breakdown[
-        ["GrupoPrimerOrden", "Días 1-8", "Días 9-16", "Días 17-24", "Días 25-fin"]
+        ["GrupoPrimerOrden", "Dias 1-8", "Dias 9-16", "Dias 17-24", "Dias 25-fin"]
     ].copy()
     breakdown_tbl = breakdown_tbl.merge(
         resumen[["GrupoPrimerOrden", "PctReorden_%"]], on="GrupoPrimerOrden", how="left"
     )
     breakdown_tbl = breakdown_tbl[
-        ["GrupoPrimerOrden", "PctReorden_%", "Días 1-8", "Días 9-16", "Días 17-24", "Días 25-fin"]
+        ["GrupoPrimerOrden", "PctReorden_%", "Dias 1-8", "Dias 9-16", "Dias 17-24", "Dias 25-fin"]
     ]
     breakdown_tbl.columns = [
         "Grupo primer pedido",
         "% Reorden del grupo",
-        "% reórdenes en 1–8",
-        "% reórdenes en 9–16",
-        "% reórdenes en 17–24",
-        "% reórdenes en 25–fin",
+        "% reordenes en 1-8",
+        "% reordenes en 9-16",
+        "% reordenes en 17-24",
+        "% reordenes en 25-fin",
     ]
 
     _no_reorders = breakdown_tbl[
-        ["% reórdenes en 1–8", "% reórdenes en 9–16", "% reórdenes en 17–24", "% reórdenes en 25–fin"]
+        ["% reordenes en 1-8", "% reordenes en 9-16", "% reordenes en 17-24", "% reordenes en 25-fin"]
     ].sum().sum() == 0
 
     st.markdown(
         '<div class="mk-card">'
-        '<h3 class="mk-card-title">¿Cuándo reordenan? — Distribución de reórdenes por grupo de primer pedido</h3>'
+        '<h3 class="mk-card-title">Cuando reordenan - Distribucion de reordenes por grupo de primer pedido</h3>'
         "</div>",
         unsafe_allow_html=True,
     )
     if _no_reorders:
         st.markdown(
-            "<div class='mk-insight'>Sin reórdenes en la selección actual — "
+            "<div class='mk-insight'>Sin reordenes en la seleccion actual - "
             "todos los valores son 0%.</div>",
             unsafe_allow_html=True,
         )
 
     _pct_cols = [
         "% Reorden del grupo",
-        "% reórdenes en 1–8",
-        "% reórdenes en 9–16",
-        "% reórdenes en 17–24",
-        "% reórdenes en 25–fin",
+        "% reordenes en 1-8",
+        "% reordenes en 9-16",
+        "% reordenes en 17-24",
+        "% reordenes en 25-fin",
     ]
     styled_breakdown = (
         breakdown_tbl.style
         .format({c: "{:.1f}%" for c in _pct_cols})
         .background_gradient(
-            subset=["% reórdenes en 1–8", "% reórdenes en 9–16",
-                    "% reórdenes en 17–24", "% reórdenes en 25–fin"],
+            subset=["% reordenes en 1-8", "% reordenes en 9-16",
+                    "% reordenes en 17-24", "% reordenes en 25-fin"],
             cmap="RdPu",
             vmin=0,
             vmax=100,
@@ -840,19 +895,17 @@ with tab1:
     st.dataframe(styled_breakdown, use_container_width=True)
     st.markdown(
         "<div class='mk-caption'>"
-        "Cada fila muestra, para las consultoras cuyo <b>primer pedido del mes</b> cayó en ese grupo de días, "
-        "qué porcentaje de sus reórdenes ocurrieron en cada rango del mes. "
-        "Las celdas vacías (0%) corresponden a combinaciones temporalmente imposibles "
-        "(no se puede reordenar en un bucket anterior al del primer pedido)."
+        "Cada fila muestra, para las consultoras cuyo <b>primer pedido del mes</b> cayo en ese grupo de dias, "
+        "que porcentaje de sus reordenes ocurrieron en cada rango del mes. "
+        "Las celdas vacias (0%) corresponden a combinaciones temporalmente imposibles."
         "</div>",
         unsafe_allow_html=True,
     )
 
-
-    # ── Tabla: ¿Cuánto reordenan? ──────────────────────────────────────────
+    # Tabla: cuanto reordenan
     st.markdown(
         '<div class="mk-card">'
-        '<h3 class="mk-card-title">¿Cuánto reordenan? — Monto de reórdenes por grupo de primer pedido</h3>'
+        '<h3 class="mk-card-title">Cuanto reordenan - Monto de reordenes por grupo de primer pedido</h3>'
         "</div>",
         unsafe_allow_html=True,
     )
@@ -863,11 +916,10 @@ with tab1:
 
     if _amt_all_nan:
         st.markdown(
-            "<div class='mk-insight'>Sin reórdenes en la selección actual — no hay montos que mostrar.</div>",
+            "<div class='mk-insight'>Sin reordenes en la seleccion actual - no hay montos que mostrar.</div>",
             unsafe_allow_html=True,
         )
     else:
-        # ── Sub-tabla: Promedio ────────────────────────────────────────────
         st.markdown(
             "<div class='mk-caption' style='margin-top:10px; font-weight:700; color:#374151;'>"
             "Promedio de wholesale por reorden (MXN)</div>",
@@ -875,10 +927,10 @@ with tab1:
         )
 
         avg_tbl = amt_avg_wide[["GrupoPrimerOrden"] + GRUPO_ORDER].copy()
-        avg_tbl.columns = ["Grupo primer pedido"] + [f"Reorden en {b.replace('Días ', '')}" for b in GRUPO_ORDER]
+        avg_tbl.columns = ["Grupo primer pedido"] + [f"Reorden en {b.replace('Dias ', '')}" for b in GRUPO_ORDER]
 
         _avg_money_cols = [c for c in avg_tbl.columns if c != "Grupo primer pedido"]
-        _avg_format     = {c: lambda v: f"${v:,.0f}" if pd.notna(v) else "—" for c in _avg_money_cols}
+        _avg_format     = {c: lambda v: f"${v:,.0f}" if pd.notna(v) else "-" for c in _avg_money_cols}
 
         styled_avg = (
             avg_tbl.style
@@ -891,18 +943,17 @@ with tab1:
             pass
         st.dataframe(styled_avg, use_container_width=True)
 
-        # ── Sub-tabla: Mediana ─────────────────────────────────────────────
         st.markdown(
             "<div class='mk-caption' style='margin-top:14px; font-weight:700; color:#374151;'>"
-            "Mediana de wholesale por reorden (MXN) — más robusta ante valores atípicos</div>",
+            "Mediana de wholesale por reorden (MXN) - mas robusta ante valores atipicos</div>",
             unsafe_allow_html=True,
         )
 
         med_tbl = amt_med_wide[["GrupoPrimerOrden"] + GRUPO_ORDER].copy()
-        med_tbl.columns = ["Grupo primer pedido"] + [f"Reorden en {b.replace('Días ', '')}" for b in GRUPO_ORDER]
+        med_tbl.columns = ["Grupo primer pedido"] + [f"Reorden en {b.replace('Dias ', '')}" for b in GRUPO_ORDER]
 
         _med_money_cols = [c for c in med_tbl.columns if c != "Grupo primer pedido"]
-        _med_format     = {c: lambda v: f"${v:,.0f}" if pd.notna(v) else "—" for c in _med_money_cols}
+        _med_format     = {c: lambda v: f"${v:,.0f}" if pd.notna(v) else "-" for c in _med_money_cols}
 
         styled_med = (
             med_tbl.style
@@ -915,21 +966,15 @@ with tab1:
             pass
         st.dataframe(styled_med, use_container_width=True)
 
-        # ── Caption explicativa ────────────────────────────────────────────
         st.markdown(
             "<div class='mk-caption'>"
-            "Cada celda muestra el monto promedio (o mediana) de wholesale de las <b>reórdenes</b> "
-            "colocadas en ese rango de días, para consultoras cuyo primer pedido del mes cayó en el grupo indicado. "
-            "Las celdas con <b>None</b> corresponden a combinaciones temporalmente imposibles "
-            "(no se puede reordenar antes del primer pedido). "
-            "Usa la mediana para comparaciones más robustas si hay outliers."
+            "Cada celda muestra el monto promedio (o mediana) de wholesale de las <b>reordenes</b> "
+            "colocadas en ese rango de dias. Usa la mediana para comparaciones mas robustas si hay outliers."
             "</div>",
             unsafe_allow_html=True,
         )
 
-        # ── Insight automático ─────────────────────────────────────────────
         try:
-            # Comparar monto mediana de reórdenes en días 25-fin entre grupos extremos
             col_fin = "Reorden en 25-fin"
             if col_fin in med_tbl.columns:
                 med_fin = med_tbl.set_index("Grupo primer pedido")[col_fin].dropna()
@@ -937,26 +982,26 @@ with tab1:
                     g_max = med_fin.idxmax()
                     g_min = med_fin.idxmin()
                     st.markdown(
-                        f"<div class='mk-insight'><b>Insight:</b> Las reórdenes colocadas en <b>días 25–fin</b> "
+                        f"<div class='mk-insight'><b>Insight:</b> Las reordenes colocadas en <b>dias 25-fin</b> "
                         f"tienen mayor monto mediano en el grupo <b>{g_max}</b> "
                         f"(<b>${med_fin[g_max]:,.0f}</b>) y menor en <b>{g_min}</b> "
                         f"(<b>${med_fin[g_min]:,.0f}</b>). "
-                        "Considera campañas de cierre de mes diferenciadas por perfil de primer pedido.</div>",
+                        "Considera campanas de cierre de mes diferenciadas por perfil de primer pedido.</div>",
                         unsafe_allow_html=True,
                     )
         except Exception:
             pass
 
-
+    # Tabla resumen
     st.markdown('<div class="mk-card"><h3 class="mk-card-title">Tabla resumen</h3></div>', unsafe_allow_html=True)
 
     tabla = resumen[["GrupoPrimerOrden", "ConsultorasUnicas", "PctReorden_%", "AvgWholesale", "MedianaWS"]].copy()
-    tabla.columns = ["Grupo", "Consultoras únicas", "% Reorden", "Avg Wholesale (MXN)", "Mediana Wholesale (MXN)"]
+    tabla.columns = ["Grupo", "Consultoras unicas", "% Reorden", "Avg Wholesale (MXN)", "Mediana Wholesale (MXN)"]
 
     styled = (
         tabla.style
         .format({
-            "Consultoras únicas":        "{:,}",
+            "Consultoras unicas":        "{:,}",
             "% Reorden":                 "{:.1f}%",
             "Avg Wholesale (MXN)":       "${:,.0f}",
             "Mediana Wholesale (MXN)":   "${:,.0f}",
@@ -982,7 +1027,7 @@ with tab1:
             unsafe_allow_html=True,
         )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Tab 2: Por mes
+# ====================================================================== TAB 2
 with tab2:
     resumen_mes = (
         primer_f.groupby(["MonthSort", "Month", "GrupoPrimerOrden"], observed=True)
@@ -1008,10 +1053,10 @@ with tab2:
             line=dict(color=color, width=3),
             marker=dict(size=8, color=color),
         ))
-    fig_line = mk_plotly_layout(fig_line, "Evolución del % Reorden por mes", "% Reorden")
+    fig_line = mk_plotly_layout(fig_line, "Evolucion del % Reorden por mes", "% Reorden")
     st.plotly_chart(fig_line, use_container_width=True)
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Tab 3: Wholesale
+# ====================================================================== TAB 3
 with tab3:
     c1, c2 = st.columns(2)
 
@@ -1032,8 +1077,8 @@ with tab3:
             "MXN",
         )
         st.markdown(
-            "<div class='mk-caption'>Usando mediana para mayor robustez ante órdenes atípicas. "
-            "Valores winzorizados al 1%–99% al cargar.</div>",
+            "<div class='mk-caption'>Usando mediana para mayor robustez ante ordenes atipicas. "
+            "Valores winzorizados al 1%-99% al cargar.</div>",
             unsafe_allow_html=True,
         )
         st.plotly_chart(fig_ws, use_container_width=True)
@@ -1048,25 +1093,23 @@ with tab3:
                 y=sub, name=grupo,
                 marker_color=color, line_color=color, boxmean=True,
             ))
-        fig_box = mk_plotly_layout(fig_box, "Distribución de Wholesale por grupo", "MXN")
+        fig_box = mk_plotly_layout(fig_box, "Distribucion de Wholesale por grupo", "MXN")
         fig_box.update_yaxes(tickprefix="$", separatethousands=True)
         st.plotly_chart(fig_box, use_container_width=True)
 
     st.markdown(
-        "<div class='mk-insight'><b>Lectura recomendada:</b> interpreta el boxplot para ver mediana y dispersión; "
+        "<div class='mk-insight'><b>Lectura recomendada:</b> interpreta el boxplot para ver mediana y dispersion; "
         "el promedio puede moverse por outliers.</div>",
         unsafe_allow_html=True,
     )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Tab 4: Insights
+# ====================================================================== TAB 4
 with tab4:
-    # Perfil de órdenes diarias ──────────────────────────────────────────
     st.markdown(
-        '<div class="mk-card"><h3 class="mk-card-title">Patrón promedio de órdenes por día del mes</h3></div>',
+        '<div class="mk-card"><h3 class="mk-card-title">Patron promedio de ordenes por dia del mes</h3></div>',
         unsafe_allow_html=True,
     )
 
-    # Une df_f con el grupo del primer pedido de cada consultora-mes
     df_with_grupo = df_f.merge(
         primer_f[["ConsultantNumber", "MonthSort", "GrupoPrimerOrden"]],
         on=["ConsultantNumber", "MonthSort"],
@@ -1082,7 +1125,6 @@ with tab4:
                      .reset_index()
     )
 
-    # Filtrar días por MaxDay real del mes en los datos (evita sesgo en meses cortos)
     month_max_day = (
         df_with_grupo.groupby("MonthSort")["Day"]
                      .max()
@@ -1106,13 +1148,13 @@ with tab4:
             x=sub["Day"], y=sub["AvgOrders"],
             mode="lines", name=grupo,
             line=dict(color=color, width=3),
-            hovertemplate="<b>%{fullData.name}</b><br>Día %{x}: %{y:.1f} órdenes promedio<extra></extra>",
+            hovertemplate="<b>%{fullData.name}</b><br>Dia %{x}: %{y:.1f} ordenes promedio<extra></extra>",
         ))
     fig_profile = mk_plotly_layout(
         fig_profile,
-        "Perfil promedio de órdenes (orden + reorden) por día del mes",
-        y_title="Órdenes promedio",
-        x_title="Día del mes (1–31)",
+        "Perfil promedio de ordenes (orden + reorden) por dia del mes",
+        y_title="Ordenes promedio",
+        x_title="Dia del mes (1-31)",
     )
     fig_profile.update_xaxes(
         dtick=1,
@@ -1125,21 +1167,19 @@ with tab4:
     )
     st.plotly_chart(fig_profile, use_container_width=True)
 
-    # Eventos de reorden ──────────────────────────────────────────────────
     d  = build_reorder_events(df_f)
     re = d[d["IsReorderEvent"]].copy()
 
     if re.empty:
         st.markdown(
-            "<div class='mk-insight'><b>Nota:</b> En la selección actual no aparecen reórdenes "
-            "bajo la definición operacional (órdenes posteriores al primer pedido del mes por consultora).</div>",
+            "<div class='mk-insight'><b>Nota:</b> En la seleccion actual no aparecen reordenes "
+            "bajo la definicion operacional.</div>",
             unsafe_allow_html=True,
         )
     else:
-        # Career level / multinivel breakdown ────────────────────────────
         if "CareerLevelCode" in df_f.columns:
             st.markdown(
-                '<div class="mk-card"><h3 class="mk-card-title">Reórdenes por Career Level (multinivel)</h3></div>',
+                '<div class="mk-card"><h3 class="mk-card-title">Reordenes por Career Level (multinivel)</h3></div>',
                 unsafe_allow_html=True,
             )
 
@@ -1176,15 +1216,15 @@ with tab4:
                     cliponaxis=False,
                     hovertemplate=(
                         "<b>CareerLevel %{y}</b><br>Grupo: %{fullData.name}"
-                        "<br>Reórdenes: %{x:,}<extra></extra>"
+                        "<br>Reordenes: %{x:,}<extra></extra>"
                     ),
                 ))
             fig_lvl.update_layout(barmode="group")
             fig_lvl = mk_plotly_layout(
                 fig_lvl,
-                f"Reórdenes por Career Level — Top {top_n} niveles más activos",
+                f"Reordenes por Career Level - Top {top_n} niveles mas activos",
                 y_title="",
-                x_title="Número de reórdenes",
+                x_title="Numero de reordenes",
             )
             fig_lvl.update_xaxes(
                 title_font=dict(color=MK_GRAY_900, size=14, family=_FONT_FAMILY),
@@ -1201,28 +1241,27 @@ with tab4:
             if not top_lvl.empty:
                 lines = [
                     f"<li><b>{r['GrupoPrimerOrden']}</b>: CareerLevel "
-                    f"<b>{r['CareerLevelCode']}</b> lidera con <b>{int(r['Reorders']):,}</b> reórdenes.</li>"
+                    f"<b>{r['CareerLevelCode']}</b> lidera con <b>{int(r['Reorders']):,}</b> reordenes.</li>"
                     for _, r in top_lvl.iterrows()
                 ]
                 st.markdown(
-                    "<div class='mk-insight'><b>Lectura rápida:</b><ul>"
+                    "<div class='mk-insight'><b>Lectura rapida:</b><ul>"
                     + "".join(lines)
                     + "</ul></div>",
                     unsafe_allow_html=True,
                 )
 
-        # Montos: primera orden vs reórdenes ─────────────────────────────
         st.markdown(
-            '<div class="mk-card"><h3 class="mk-card-title">Montos: promedio/mediana y comportamiento de reórdenes</h3></div>',
+            '<div class="mk-card"><h3 class="mk-card-title">Montos: promedio/mediana y comportamiento de reordenes</h3></div>',
             unsafe_allow_html=True,
         )
 
         first_orders = d[~d["IsReorderEvent"]].copy()
         amount_summary = pd.DataFrame({
-            "Tipo": ["Primera orden (del mes)", "Reórdenes (del mes)"],
+            "Tipo": ["Primera orden (del mes)", "Reordenes (del mes)"],
             "Promedio Wholesale": [first_orders[ws_col].mean(), re[ws_col].mean()],
             "Mediana Wholesale":  [first_orders[ws_col].median(), re[ws_col].median()],
-            "Órdenes":            [first_orders["OrderKEY"].nunique(), re["OrderKEY"].nunique()],
+            "Ordenes":            [first_orders["OrderKEY"].nunique(), re["OrderKEY"].nunique()],
         })
         amount_summary["Promedio Wholesale"] = amount_summary["Promedio Wholesale"].round(0)
         amount_summary["Mediana Wholesale"]  = amount_summary["Mediana Wholesale"].round(0)
@@ -1234,41 +1273,303 @@ with tab4:
               .fillna(0)
         )
         if bucket_amount.sum() > 0:
-            pct_end = 100 * bucket_amount.loc["Días 25-fin"] / bucket_amount.sum()
+            pct_end = 100 * bucket_amount.loc["Dias 25-fin"] / bucket_amount.sum()
             st.markdown(
-                f"<div class='mk-insight'><b>Insight:</b> Del total de wholesale en reórdenes, "
-                f"<b>{pct_end:.1f}%</b> ocurre en <b>días 25–fin</b> (selección actual). "
-                "Si esto se mantiene por meses, es un buen candidato para calendarizar acciones "
+                f"<div class='mk-insight'><b>Insight:</b> Del total de wholesale en reordenes, "
+                f"<b>{pct_end:.1f}%</b> ocurre en <b>dias 25-fin</b> (seleccion actual). "
+                "Si esto se mantiene por meses, es buen candidato para calendarizar acciones "
                 "comerciales cerca del cierre.</div>",
                 unsafe_allow_html=True,
             )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Tab 5: Datos
+# ====================================================================== TAB RECURRENCIA (NUEVO)
+with tab_rec:
+    st.markdown(
+        '<div class="mk-card">'
+        '<h3 class="mk-card-title">Consultoras recurrentes inactivas (lapsing customers)</h3>'
+        '<div class="mk-caption">'
+        'Filtrado RFM clasico: consultoras que ordenaron en al menos N meses del historico '
+        '(frequency) y que se quedaron sin orden este mes o el anterior (recency). '
+        'El listado se descarga con datos demograficos para reactivacion.'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Matriz binaria sobre TODO el panel (no filtrado por meses_sel)
+    # Razon: para evaluar recurrencia necesitas el historico completo.
+    mat = build_recurrence_matrix(primer)
+
+    if mat.shape[1] < 2:
+        st.warning("El dataset tiene menos de 2 meses; no se puede evaluar recurrencia.")
+        st.stop()
+
+    meses_ord = list(mat.columns)
+    mes_actual_ts   = meses_ord[-1]
+    mes_anterior_ts = meses_ord[-2]
+    mes_actual_str   = mes_actual_ts.strftime("%b %Y")
+    mes_anterior_str = mes_anterior_ts.strftime("%b %Y")
+    n_meses_historico = len(meses_ord) - 1  # excluyendo el actual
+
+    # ----- controles -----
+    c1, c2, c3 = st.columns([1.2, 1.6, 1.2])
+
+    with c1:
+        n_recurrencia = st.slider(
+            "Recurrencia minima (N meses con orden en historico previo)",
+            min_value=1,
+            max_value=max(1, n_meses_historico),
+            value=min(3, n_meses_historico),
+            help=(
+                f"Considera el historico previo al mes actual ({mes_actual_str}). "
+                f"Hay {n_meses_historico} meses previos disponibles."
+            ),
+        )
+
+    with c2:
+        filtro_inactividad = st.radio(
+            "Criterio de inactividad",
+            options=[
+                f"Sin orden este mes ({mes_actual_str})",
+                f"Sin orden mes anterior ({mes_anterior_str})",
+                f"Sin orden este mes Y mes anterior",
+            ],
+            index=0,
+        )
+
+    with c3:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        incluir_real_id_en_descarga = st.checkbox(
+            "Incluir ConsultantNumber en CSV de descarga",
+            value=True,
+            help="La UI siempre muestra solo ID anonimo. Este toggle controla si el CSV descargado incluye el numero real (uso operativo interno).",
+        )
+
+    # ----- computar mascara -----
+    meses_historico = meses_ord[:-1]
+    n_ordenes_previas = mat[meses_historico].sum(axis=1)
+
+    sin_actual   = mat[mes_actual_ts] == 0
+    sin_anterior = mat[mes_anterior_ts] == 0
+
+    es_recurrente = n_ordenes_previas >= n_recurrencia
+
+    if filtro_inactividad.startswith("Sin orden este mes Y"):
+        mask = es_recurrente & sin_actual & sin_anterior
+        criterio_label = "Sin orden este mes Y mes anterior"
+    elif filtro_inactividad.startswith("Sin orden este mes"):
+        mask = es_recurrente & sin_actual
+        criterio_label = f"Sin orden en {mes_actual_str}"
+    else:
+        mask = es_recurrente & sin_anterior
+        criterio_label = f"Sin orden en {mes_anterior_str}"
+
+    target_cn = mat.index[mask].tolist()
+
+    # ----- KPIs -----
+    n_target  = len(target_cn)
+    n_recurr_total = int(es_recurrente.sum())
+    pct_lapsing = (100 * n_target / n_recurr_total) if n_recurr_total > 0 else 0.0
+
+    # Wholesale historico total del segmento target (proxy de valor en riesgo)
+    if n_target > 0:
+        ws_total_target = float(
+            primer[primer["ConsultantNumber"].isin(target_cn)]["TotalWholesale"].sum()
+        )
+    else:
+        ws_total_target = 0.0
+
+    k1r, k2r, k3r, k4r = st.columns(4)
+    kpi_card(k1r, "Consultoras en riesgo", f"{n_target:,}", criterio_label)
+    kpi_card(k2r, "Recurrentes totales",   f"{n_recurr_total:,}", f">= {n_recurrencia} meses con orden")
+    kpi_card(k3r, "% recurrentes lapsing", f"{pct_lapsing:.1f}%")
+    kpi_card(k4r, "Wholesale historico (total)", f"${ws_total_target:,.0f}", "Valor acumulado del segmento")
+
+    if n_target == 0:
+        st.markdown(
+            "<div class='mk-insight'>No hay consultoras que cumplan ambos criterios con los filtros actuales. "
+            "Prueba bajar el umbral de recurrencia o cambiar el criterio de inactividad.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        # ----- construir tabla enriquecida -----
+        # Datos derivados del panel
+        agg_target = (
+            primer[primer["ConsultantNumber"].isin(target_cn)]
+            .groupby("ConsultantNumber", as_index=False)
+            .agg(
+                MesesConOrden=("MonthSort", "nunique"),
+                TotalOrdenes=("TotalOrdenes", "sum"),
+                WholesaleAcumulado=("TotalWholesale", "sum"),
+                TicketPromedio=("AvgWholesale", "mean"),
+                UltimoMesActivo=("MonthSort", "max"),
+            )
+        )
+
+        # Last-known info demografica
+        last_info = get_last_known_info(df, demo_cols)
+        agg_target = agg_target.merge(last_info, on="ConsultantNumber", how="left")
+
+        # Anonimizar ID para UI
+        agg_target["AnonID"] = agg_target["ConsultantNumber"].map(anon_map)
+
+        # Formatear UltimaOrden y UltimoMesActivo
+        if "UltimaOrden" in agg_target.columns:
+            agg_target["UltimaOrden"] = pd.to_datetime(agg_target["UltimaOrden"]).dt.strftime("%Y-%m-%d")
+        agg_target["UltimoMesActivo"] = pd.to_datetime(agg_target["UltimoMesActivo"]).dt.strftime("%b %Y")
+
+        # Renombrar columnas demograficas a nombres canonicos (si existen)
+        rename_map = {}
+        if "name" in demo_cols:         rename_map[demo_cols["name"]]         = "Nombre"
+        if "division" in demo_cols:     rename_map[demo_cols["division"]]     = "Division"
+        if "career_level" in demo_cols: rename_map[demo_cols["career_level"]] = "CareerLevel"
+        if "status" in demo_cols:       rename_map[demo_cols["status"]]       = "Estatus"
+        agg_target = agg_target.rename(columns=rename_map)
+
+        # Ordenar por valor descendente
+        agg_target = agg_target.sort_values(
+            ["WholesaleAcumulado", "MesesConOrden"],
+            ascending=[False, False]
+        )
+
+        # ===== version UI (sin ConsultantNumber, con AnonID) =====
+        ui_cols_order = ["AnonID"]
+        for c in ["Nombre", "Division", "CareerLevel", "Estatus"]:
+            if c in agg_target.columns:
+                ui_cols_order.append(c)
+        ui_cols_order += [
+            "MesesConOrden", "TotalOrdenes",
+            "WholesaleAcumulado", "TicketPromedio",
+            "UltimoMesActivo",
+        ]
+        if "UltimaOrden" in agg_target.columns:
+            ui_cols_order.append("UltimaOrden")
+
+        ui_view = agg_target[ui_cols_order].copy()
+
+        # En UI, enmascarar el nombre real si esta presente (privacidad mientras se ve en pantalla)
+        # Formato: "MARIA G***"
+        def _mask_name(s: str) -> str:
+            if not s or s == "nan":
+                return ""
+            parts = s.split()
+            if len(parts) == 1:
+                return parts[0]
+            return f"{parts[0]} {parts[1][0]}***"
+
+        if "Nombre" in ui_view.columns:
+            ui_view["Nombre"] = ui_view["Nombre"].astype(str).apply(_mask_name)
+
+        styled_ui = (
+            ui_view.style
+            .format({
+                "MesesConOrden":      "{:,.0f}",
+                "TotalOrdenes":       "{:,.0f}",
+                "WholesaleAcumulado": "${:,.0f}",
+                "TicketPromedio":     "${:,.0f}",
+            })
+            .background_gradient(subset=["MesesConOrden", "WholesaleAcumulado"], cmap="RdPu")
+        )
+        try:
+            styled_ui = styled_ui.hide(axis="index")
+        except Exception:
+            pass
+
+        st.markdown(
+            f"<div class='mk-caption' style='margin-top:14px;'>"
+            f"Mostrando <b>{n_target:,}</b> consultoras. "
+            f"La UI muestra solo ID anonimo; el nombre aparece enmascarado. "
+            f"Descarga el CSV para la lista completa de campo."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.dataframe(styled_ui, use_container_width=True, height=520)
+
+        # ===== version descarga (con datos reales) =====
+        dl_cols_order = []
+        if incluir_real_id_en_descarga:
+            dl_cols_order.append("ConsultantNumber")
+        dl_cols_order.append("AnonID")
+        for c in ["Nombre", "Division", "CareerLevel", "Estatus"]:
+            if c in agg_target.columns:
+                dl_cols_order.append(c)
+        dl_cols_order += [
+            "MesesConOrden", "TotalOrdenes",
+            "WholesaleAcumulado", "TicketPromedio",
+            "UltimoMesActivo",
+        ]
+        if "UltimaOrden" in agg_target.columns:
+            dl_cols_order.append("UltimaOrden")
+
+        dl_view = agg_target[dl_cols_order].copy()
+        csv_lapsing = dl_view.to_csv(index=False).encode("utf-8")
+
+        fname_suffix = criterio_label.lower().replace(" ", "_").replace("/", "-")
+        st.download_button(
+            f"Descargar lista de {n_target:,} consultoras en riesgo (CSV)",
+            data=csv_lapsing,
+            file_name=f"consultoras_recurrentes_lapsing_{fname_suffix}_N{n_recurrencia}.csv",
+            mime="text/csv",
+        )
+
+        # Aviso si faltan columnas demograficas
+        missing_demo = [r for r in ["name", "division", "career_level", "status"] if r not in demo_cols]
+        if missing_demo:
+            roles_es = {
+                "name": "Nombre",
+                "division": "Division",
+                "career_level": "CareerLevel",
+                "status": "Estatus",
+            }
+            faltantes = ", ".join(roles_es[r] for r in missing_demo)
+            st.markdown(
+                f"<div class='mk-insight'><b>Nota:</b> El CSV cargado no incluye estas columnas: "
+                f"<b>{faltantes}</b>. "
+                f"Para enriquecer la descarga, agrega un JOIN a <code>dm.DimConsultant</code> "
+                f"(nombre, UnitID), <code>dm.DimUnit</code> (division/area) y "
+                f"<code>ref.ActivityStatusKeys</code> (ActivityStatusCode) en el query "
+                f"que genera el CSV.</div>",
+                unsafe_allow_html=True,
+            )
+
+# ====================================================================== TAB 5
 with tab5:
     st.markdown('<div class="mk-card"><h3 class="mk-card-title">Datos procesados</h3></div>', unsafe_allow_html=True)
     st.markdown(f"<div class='mk-caption'>Registros: {len(primer_f):,}</div>", unsafe_allow_html=True)
 
+    # Vista UI: anonimizada
+    data_view = primer_f.copy()
+    data_view["AnonID"] = data_view["ConsultantNumber"].map(anon_map)
+
     cols_show = [
-        "ConsultantNumber", "Month", "GrupoPrimerOrden", "PrimerDia",
+        "AnonID", "Month", "GrupoPrimerOrden", "PrimerDia",
         "TotalOrderDays", "TotalOrdenes", "TotalWholesale", "AvgWholesale", "Reordena",
     ]
-    data_view = primer_f[cols_show].sort_values(["Month", "GrupoPrimerOrden"]).reset_index(drop=True)
+    data_view_ui = data_view[cols_show].sort_values(["Month", "GrupoPrimerOrden"]).reset_index(drop=True)
 
-    st.dataframe(data_view, use_container_width=True, height=520)
+    st.dataframe(data_view_ui, use_container_width=True, height=520)
 
-    csv_out = data_view.to_csv(index=False).encode("utf-8")
+    st.markdown(
+        "<div class='mk-caption'>La columna <b>ConsultantNumber</b> esta oculta en la UI por confidencialidad. "
+        "Se reemplaza por un ID anonimo estable durante la sesion. "
+        "La descarga si incluye ConsultantNumber para uso interno.</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Descarga: incluye ConsultantNumber real
+    data_dl = data_view[["ConsultantNumber", "AnonID"] + [c for c in cols_show if c != "AnonID"]].copy()
+    csv_out = data_dl.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "Descargar tabla procesada (CSV)",
+        "Descargar tabla procesada (CSV con ConsultantNumber)",
         data=csv_out,
         file_name="primer_orden_mes_analisis.csv",
         mime="text/csv",
     )
 
-# ☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★☆★ Footer
-
+# ---------------------------------------------------------------------- footer
 st.markdown(
     "<div class='mk-caption' style='text-align:center; padding-top: 14px;'>"
-    "Mary Kay de México · Market Intelligence · Steffany Lara · Febrero 2026"
+    "Mary Kay de Mexico . Market Intelligence . Steffany Lara . Febrero 2026"
     "</div>",
     unsafe_allow_html=True,
 )
