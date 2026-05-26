@@ -740,7 +740,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div class='mk-caption'>Market Intelligence . Mary Kay de Mexico<br>"
-        "Steffany Lara . Febrero 2026</div>",
+        "Steffany Lara . 2026</div>",
         unsafe_allow_html=True,
     )
 
@@ -1674,7 +1674,7 @@ with tab5:
 # ---------------------------------------------------------------------- footer
 st.markdown(
     "<div class='mk-caption' style='text-align:center; padding-top: 14px;'>"
-    "Mary Kay de Mexico . Market Intelligence . Steffany Lara . Febrero 2026"
+    "Mary Kay de Mexico . Market Intelligence . Steffany Lara . 2026"
     "</div>",
     unsafe_allow_html=True,
 )
