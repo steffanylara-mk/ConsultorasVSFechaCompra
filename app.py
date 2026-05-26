@@ -304,20 +304,7 @@ def bucketize(series: pd.Series) -> pd.Categorical:
     )
 
 
-def get_anon_id_map(consultant_numbers) -> dict:
-    """
-    Mapea ConsultantNumber -> 'C-00001' de forma estable durante la sesion.
-
-    El mapeo persiste en st.session_state, asi que IDs anonimos no cambian
-    entre rerenders cuando el usuario interactua con widgets.
-    """
-    if "anon_map" not in st.session_state:
-        st.session_state["anon_map"] = {}
-    anon_map = st.session_state["anon_map"]
-    for cn in sorted(set(consultant_numbers)):
-        if cn not in anon_map:
-            anon_map[cn] = f"C-{len(anon_map) + 1:05d}"
-    return anon_map
+# get_anon_id_map eliminado: la UI usa ConsultantKEY directo del CSV.
 
 
 # ---------------------------------------------------------------------- carga
@@ -333,7 +320,7 @@ def cargar_datos(file) -> tuple[pd.DataFrame, dict]:
     """
     df = pd.read_csv(file)
 
-    required = ["OrderDateKEY", "OrderMonthKey", "ConsultantNumber", "OrderKEY"]
+    required = ["OrderDateKEY", "ConsultantNumber", "OrderKEY"]
     for col in required:
         if col not in df.columns:
             raise ValueError(f"Falta columna requerida: {col}")
@@ -345,21 +332,16 @@ def cargar_datos(file) -> tuple[pd.DataFrame, dict]:
     else:
         raise ValueError("Falta columna de wholesale: TotalWhosale o TotalWholesale")
 
-    df["OrderDateKEY"]  = pd.to_datetime(df["OrderDateKEY"].astype(str),  format="%Y%m%d", errors="coerce")
-    df["OrderMonthKey"] = pd.to_datetime(df["OrderMonthKey"].astype(str), format="%Y%m",   errors="coerce")
+    # OrderDateKEY es la unica fecha que viene del CSV. OrderMonthKey se deriva.
+    df["OrderDateKEY"] = pd.to_datetime(df["OrderDateKEY"].astype(str), format="%Y%m%d", errors="coerce")
 
-    n_bad_dates = df["OrderDateKEY"].isna().sum() + df["OrderMonthKey"].isna().sum()
+    n_bad_dates = df["OrderDateKEY"].isna().sum()
     if n_bad_dates > 0:
         st.warning(f"{n_bad_dates} fechas no pudieron parsearse - se descartaron.")
-    df = df.dropna(subset=["OrderDateKEY", "OrderMonthKey"])
+    df = df.dropna(subset=["OrderDateKEY"])
 
-    invalid_months = (
-        (df["OrderMonthKey"].dt.year  != df["OrderDateKEY"].dt.year) |
-        (df["OrderMonthKey"].dt.month != df["OrderDateKEY"].dt.month)
-    )
-    if invalid_months.any():
-        st.warning(f"{invalid_months.sum()} filas con OrderMonthKey distinto al mes de OrderDateKEY - se descartaron.")
-        df = df[~invalid_months].copy()
+    # Derivar OrderMonthKey desde OrderDateKEY (primer dia del mes)
+    df["OrderMonthKey"] = df["OrderDateKEY"].values.astype("datetime64[M]")
 
     dup_mask = df.duplicated(subset=["OrderKEY"])
     if dup_mask.any():
@@ -421,6 +403,8 @@ def construir_primer(df: pd.DataFrame, ws_col: str) -> pd.DataFrame:
         "TotalWholesale": (ws_col, "sum"),
     }
 
+    if "ConsultantKEY" in df.columns:
+        agg_dict["ConsultantKEY"] = ("ConsultantKEY", "first")
     if "CareerLevelCode" in df.columns:
         agg_dict["CareerLevel"] = ("CareerLevelCode", "first")
     if "NewRecruitIndicator" in df.columns:
@@ -718,8 +702,8 @@ demo_cols = meta["demo_cols"]
 
 primer = construir_primer(df, ws_col)
 
-# Construir mapeo anonimo a nivel global (todas las consultoras del dataset)
-anon_map = get_anon_id_map(primer["ConsultantNumber"].unique().tolist())
+# Verificar si el CSV trae ConsultantKEY para mostrar en UI
+_tiene_ck = "ConsultantKEY" in primer.columns
 
 meses_disponibles = (
     primer[["Month", "MonthSort"]].drop_duplicates()
@@ -1410,8 +1394,13 @@ with tab_rec:
         last_info = get_last_known_info(df, demo_cols)
         agg_target = agg_target.merge(last_info, on="ConsultantNumber", how="left")
 
-        # Anonimizar ID para UI
-        agg_target["AnonID"] = agg_target["ConsultantNumber"].map(anon_map)
+        # ID para UI: ConsultantKEY si existe, de lo contrario aviso
+        if _tiene_ck and "ConsultantKEY" in agg_target.columns:
+            pass   # ya viene de last_info o del join; nada que calcular
+        elif _tiene_ck:
+            # Traer ConsultantKEY desde primer (first conocido por consultora)
+            ck_map = primer.dropna(subset=["ConsultantKEY"]).drop_duplicates("ConsultantNumber").set_index("ConsultantNumber")["ConsultantKEY"]
+            agg_target["ConsultantKEY"] = agg_target["ConsultantNumber"].map(ck_map)
 
         # Formatear UltimaOrden y UltimoMesActivo
         if "UltimaOrden" in agg_target.columns:
@@ -1432,8 +1421,8 @@ with tab_rec:
             ascending=[False, False]
         )
 
-        # ===== version UI (sin ConsultantNumber, con AnonID) =====
-        ui_cols_order = ["AnonID"]
+        # ===== version UI (ConsultantKEY visible, ConsultantNumber oculto) =====
+        ui_cols_order = ["ConsultantKEY"] if (_tiene_ck and "ConsultantKEY" in agg_target.columns) else []
         for c in ["Nombre", "Division", "CareerLevel", "Estatus"]:
             if c in agg_target.columns:
                 ui_cols_order.append(c)
@@ -1514,7 +1503,8 @@ with tab_rec:
         dl_cols_order = []
         if incluir_real_id_en_descarga:
             dl_cols_order.append("ConsultantNumber")
-        dl_cols_order.append("AnonID")
+        if _tiene_ck and "ConsultantKEY" in agg_target.columns:
+            dl_cols_order.append("ConsultantKEY")
         for c in ["Nombre", "Division", "CareerLevel", "Estatus"]:
             if c in agg_target.columns:
                 dl_cols_order.append(c)
@@ -1562,27 +1552,33 @@ with tab5:
     st.markdown('<div class="mk-card"><h3 class="mk-card-title">Datos procesados</h3></div>', unsafe_allow_html=True)
     st.markdown(f"<div class='mk-caption'>Registros: {len(primer_f):,}</div>", unsafe_allow_html=True)
 
-    # Vista UI: anonimizada
     data_view = primer_f.copy()
-    data_view["AnonID"] = data_view["ConsultantNumber"].map(anon_map)
 
-    cols_show = [
-        "AnonID", "Month", "GrupoPrimerOrden", "PrimerDia",
-        "TotalOrderDays", "TotalOrdenes", "TotalWholesale", "AvgWholesale", "Reordena",
-    ]
+    # Columnas a mostrar en UI: ConsultantKEY si existe, nunca ConsultantNumber
+    _id_col_ui = "ConsultantKEY" if (_tiene_ck and "ConsultantKEY" in data_view.columns) else None
+
+    cols_show_base = ["Month", "GrupoPrimerOrden", "PrimerDia",
+                      "TotalOrderDays", "TotalOrdenes", "TotalWholesale", "AvgWholesale", "Reordena"]
+    cols_show = ([_id_col_ui] if _id_col_ui else []) + cols_show_base
+
     data_view_ui = data_view[cols_show].sort_values(["Month", "GrupoPrimerOrden"]).reset_index(drop=True)
-
     st.dataframe(data_view_ui, use_container_width=True, height=520)
 
+    _nota_id = (
+        "La columna <b>ConsultantKEY</b> es el identificador interno del DWH. "
+        "ConsultantNumber no se muestra en la UI."
+        if _id_col_ui else
+        "El CSV no incluye ConsultantKEY. Agrega la columna en el query para verla aqui."
+    )
     st.markdown(
-        "<div class='mk-caption'>La columna <b>ConsultantNumber</b> esta oculta en la UI por confidencialidad. "
-        "Se reemplaza por un ID anonimo estable durante la sesion. "
-        "La descarga si incluye ConsultantNumber para uso interno.</div>",
+        f"<div class='mk-caption'>{_nota_id} "
+        "La descarga incluye ConsultantNumber para uso operativo interno.</div>",
         unsafe_allow_html=True,
     )
 
-    # Descarga: incluye ConsultantNumber real
-    data_dl = data_view[["ConsultantNumber", "AnonID"] + [c for c in cols_show if c != "AnonID"]].copy()
+    # Descarga: siempre incluye ConsultantNumber real
+    dl_base = ["ConsultantNumber"] + ([_id_col_ui] if _id_col_ui else []) + cols_show_base
+    data_dl = data_view[[c for c in dl_base if c in data_view.columns]].copy()
     csv_out = data_dl.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Descargar tabla procesada (CSV con ConsultantNumber)",
